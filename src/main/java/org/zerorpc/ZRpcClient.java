@@ -1,8 +1,10 @@
 package org.zerorpc;
 
 import org.zeromq.ZContext;
+import org.zeromq.ZFrame;
 import org.zeromq.ZMQ;
 import org.zeromq.ZMQ.Socket;
+import org.zeromq.ZMsg;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -24,7 +26,7 @@ public class ZRpcClient {
         this.heartbeat = heartbeat;
         this.timeout = timeout;
         this.context = new ZContext();
-        this.socket = context.createSocket(ZMQ.REQ);
+        this.socket = context.createSocket(ZMQ.DEALER);
     }
 
     public ZRpcClient() {
@@ -41,9 +43,19 @@ public class ZRpcClient {
         event.serialize(out);
 
         this.socket.send(out.toByteArray());
-        byte[] response = this.socket.recv();
-        final Event eventx = Event.deserialize(response);
-        Object o = eventx.getResult();
+        Object o = null;
+        while (o == null) {
+            ZMsg msg = ZMsg.recvMsg(this.socket);
+            ZFrame iden = msg.pop();
+            ZFrame data = msg.pop();
+            msg.destroy();
+
+            final Event eventx = Event.deserialize(data.getData());
+            if (eventx.getMethod().equals("_zpc_hb")) {
+                continue;
+            }
+            o = eventx.getResult();
+        }
         return (T)o;
     }
 
@@ -61,24 +73,41 @@ public class ZRpcClient {
             throw new IllegalStateException("ZRpcClient.get should be only used after asyncCall");
         }
 
-        byte[] response = null;
         if (blocking) {
-            response = this.socket.recv();
-        } else {
-            response = this.socket.recv(ZMQ.DONTWAIT);
-        }
+            Object o = null;
+            while (o == null) {
+                ZMsg msg = ZMsg.recvMsg(this.socket);
+                ZFrame iden = msg.pop();
+                ZFrame data = msg.pop();
+                msg.destroy();
 
-        if (response != null) {
-            async = false;
-            final Event event = Event.deserialize(response);
-            Object o = event.getResult();
-            return (T) o;
+                final Event eventx = Event.deserialize(data.getData());
+                if (eventx.getMethod().equals("_zpc_hb")) {
+                    continue;
+                }
+                o = eventx.getResult();
+            }
+            return (T)o;
         } else {
-            return null;
+            final byte[] response = this.socket.recv(ZMQ.DONTWAIT);
+            if (response == null) {
+                return null;
+            }
+            ZMsg msg = ZMsg.recvMsg(this.socket);
+            ZFrame iden = msg.pop();
+            ZFrame data = msg.pop();
+            msg.destroy();
+
+            final Event event = Event.deserialize(data.getData());
+            if (event.getMethod().equals("_zpc_hb")) {
+                return null;
+            }
+            return (T)event.getResult();
         }
     }
 
     public <T> T get() throws IOException {
         return this.get(true);
     }
+
 }
